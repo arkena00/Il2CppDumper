@@ -9,6 +9,17 @@ namespace Il2CppDumper
 {
     public class Il2CppDecompiler
     {
+        public static Dictionary<string, string> obfu_map = new Dictionary<string, string> {
+            { "OGHLFADACAG", "Rpc" }
+        };
+
+        public static string[] klasses = new string[] {
+            "GameData",
+            "PlayerControl",
+            "Rpc",
+        };
+        
+
         private Il2CppExecutor executor;
         private Metadata metadata;
         private Il2Cpp il2Cpp;
@@ -21,14 +32,78 @@ namespace Il2CppDumper
             il2Cpp = il2CppExecutor.il2Cpp;
         }
 
+        private string deobfu(string name)
+        {
+            if (obfu_map.ContainsKey(name)) return obfu_map[name];
+
+            return name;
+        }
+
+    private string clear_name(string name)
+        {
+            name = name.Replace("<>", "_");
+
+            return name;
+        }
+
+            private string include_path(Il2CppType type)
+        {
+            string output;
+            string type_name = "";
+
+            switch (type.type)
+            {
+                case Il2CppTypeEnum.IL2CPP_TYPE_ARRAY:
+                case Il2CppTypeEnum.IL2CPP_TYPE_SZARRAY:
+                {
+                    return "cs/array";
+                }
+                case Il2CppTypeEnum.IL2CPP_TYPE_STRING:
+                {
+                    return "cs/string";
+                }
+                    
+                case Il2CppTypeEnum.IL2CPP_TYPE_GENERICINST:
+                {
+                    Il2CppTypeDefinition typeDef;
+                    Il2CppGenericClass genericClass = il2Cpp.MapVATR<Il2CppGenericClass>(type.data.generic_class);
+
+                    typeDef = executor.GetGenericClassTypeDefinition(genericClass);
+
+                    var @namespace = metadata.GetStringFromIndex(typeDef.namespaceIndex);
+                    if (@namespace != "")
+                    {
+                        type_name += @namespace + ".";
+                    }
+
+                    type_name += metadata.GetStringFromIndex(typeDef.nameIndex);
+                    var index = type_name.IndexOf("`");
+                    if (index != -1) type_name = type_name.Substring(0, index);
+                    break;
+                }
+
+                default:
+                    type_name = executor.GetTypeName(type, true, false);
+                    break;
+            }
+
+            type_name = type_name.Replace(".", "/");
+            type_name = type_name.Replace("::", "/");
+            type_name = type_name.Replace("*", "");
+            output = "au/" + type_name;
+
+            return output;
+        }
+
         public void Decompile(Config config, string outputDir)
         {
-            var writer = new StreamWriter(new FileStream(outputDir + "dump.cs", FileMode.Create), new UTF8Encoding(false));
+            //var writer = new StreamWriter(new FileStream(outputDir + "dump.cs", FileMode.Create), new UTF8Encoding(false));
+
             //dump image
             for (var imageIndex = 0; imageIndex < metadata.imageDefs.Length; imageIndex++)
             {
-                var imageDef = metadata.imageDefs[imageIndex];
-                writer.Write($"// Image {imageIndex}: {metadata.GetStringFromIndex(imageDef.nameIndex)} - {imageDef.typeStart}\n");
+                //var imageDef = metadata.imageDefs[imageIndex];
+                //writer.Write($"// Image {imageIndex}: {metadata.GetStringFromIndex(imageDef.nameIndex)} - {imageDef.typeStart}\n");
             }
             //dump type
             foreach (var imageDef in metadata.imageDefs)
@@ -38,16 +113,48 @@ namespace Il2CppDumper
                     var imageName = metadata.GetStringFromIndex(imageDef.nameIndex);
                     var typeEnd = imageDef.typeStart + imageDef.typeCount;
                     for (int typeDefIndex = imageDef.typeStart; typeDefIndex < typeEnd; typeDefIndex++)
-                    {
+                    { 
+                        var types = new HashSet<Il2CppType>();
+                        var includes = new HashSet<string>();
+
                         var typeDef = metadata.typeDefs[typeDefIndex];
+                        var typeName = executor.GetTypeDefName(typeDef, false, true);
                         var extends = new List<string>();
+                        var namespaze = metadata.GetStringFromIndex(typeDef.namespaceIndex);
+
+                        if (typeName.Contains("<")) continue;
+
+                        typeName = typeName.Replace("::", "_");
+                        typeName = deobfu(typeName);
+
+                        // skip
+                        if (!klasses.Contains(typeName)) continue;
+
+                        // outputs
+                        string headers = "#pragma once\n#include <ark/class.hpp>\n";
+                        string statics_def = "";
+                        string methods_rva = "";
+                        string fields = "";
+                        string methods = "";
+                        string klass = "";
+                        string klass_inerhit = "";
+
+                        // file
+                        string file_path = "au/" + namespaze + "/";
+                        file_path += typeName + ".hpp";
+                        Console.WriteLine("Make file " + typeName + " @ " + file_path);
+
+                        Directory.CreateDirectory(Path.GetDirectoryName(file_path));
+                        var writer = new StreamWriter(new FileStream(outputDir + file_path, FileMode.Create), new UTF8Encoding(false));
+
                         if (typeDef.parentIndex >= 0)
                         {
                             var parent = il2Cpp.types[typeDef.parentIndex];
-                            var parentName = executor.GetTypeName(parent, false, false);
+                            var parentName = executor.GetTypeName(parent, true, false, false);
                             if (!typeDef.IsValueType && !typeDef.IsEnum && parentName != "object")
                             {
                                 extends.Add(parentName);
+                                types.Add(parent);
                             }
                         }
                         if (typeDef.interfaces_count > 0)
@@ -55,64 +162,43 @@ namespace Il2CppDumper
                             for (int i = 0; i < typeDef.interfaces_count; i++)
                             {
                                 var @interface = il2Cpp.types[metadata.interfaceIndices[typeDef.interfacesStart + i]];
-                                extends.Add(executor.GetTypeName(@interface, false, false));
+                                //extends.Add(executor.GetTypeName(@interface, false, false));
                             }
                         }
-                        writer.Write($"\n// Namespace: {metadata.GetStringFromIndex(typeDef.namespaceIndex)}\n");
-                        if (config.DumpAttribute)
-                        {
-                            writer.Write(GetCustomAttribute(imageDef, typeDef.customAttributeIndex, typeDef.token));
-                        }
-                        if (config.DumpAttribute && (typeDef.flags & TYPE_ATTRIBUTE_SERIALIZABLE) != 0)
-                            writer.Write("[Serializable]\n");
-                        var visibility = typeDef.flags & TYPE_ATTRIBUTE_VISIBILITY_MASK;
-                        switch (visibility)
-                        {
-                            case TYPE_ATTRIBUTE_PUBLIC:
-                            case TYPE_ATTRIBUTE_NESTED_PUBLIC:
-                                writer.Write("public ");
-                                break;
-                            case TYPE_ATTRIBUTE_NOT_PUBLIC:
-                            case TYPE_ATTRIBUTE_NESTED_FAM_AND_ASSEM:
-                            case TYPE_ATTRIBUTE_NESTED_ASSEMBLY:
-                                writer.Write("internal ");
-                                break;
-                            case TYPE_ATTRIBUTE_NESTED_PRIVATE:
-                                writer.Write("private ");
-                                break;
-                            case TYPE_ATTRIBUTE_NESTED_FAMILY:
-                                writer.Write("protected ");
-                                break;
-                            case TYPE_ATTRIBUTE_NESTED_FAM_OR_ASSEM:
-                                writer.Write("protected internal ");
-                                break;
-                        }
-                        if ((typeDef.flags & TYPE_ATTRIBUTE_ABSTRACT) != 0 && (typeDef.flags & TYPE_ATTRIBUTE_SEALED) != 0)
-                            writer.Write("static ");
-                        else if ((typeDef.flags & TYPE_ATTRIBUTE_INTERFACE) == 0 && (typeDef.flags & TYPE_ATTRIBUTE_ABSTRACT) != 0)
-                            writer.Write("abstract ");
-                        else if (!typeDef.IsValueType && !typeDef.IsEnum && (typeDef.flags & TYPE_ATTRIBUTE_SEALED) != 0)
-                            writer.Write("sealed ");
-                        if ((typeDef.flags & TYPE_ATTRIBUTE_INTERFACE) != 0)
-                            writer.Write("interface ");
+
+
+                        //if ((typeDef.flags & TYPE_ATTRIBUTE_ABSTRACT) != 0 && (typeDef.flags & TYPE_ATTRIBUTE_SEALED) != 0)
+                        //writer.Write("static ");
+                        //else if ((typeDef.flags & TYPE_ATTRIBUTE_INTERFACE) == 0 && (typeDef.flags & TYPE_ATTRIBUTE_ABSTRACT) != 0)
+                        //writer.Write("abstract ");
+                        if (!typeDef.IsValueType && !typeDef.IsEnum && (typeDef.flags & TYPE_ATTRIBUTE_SEALED) != 0)
+                            writer.Write("final ");
+                        //if ((typeDef.flags & TYPE_ATTRIBUTE_INTERFACE) != 0)
+                        //writer.Write("interface ");
                         else if (typeDef.IsEnum)
-                            writer.Write("enum ");
+                            klass += "enum ";
                         else if (typeDef.IsValueType)
-                            writer.Write("struct ");
+                            klass += "struct ";
                         else
-                            writer.Write("class ");
-                        var typeName = executor.GetTypeDefName(typeDef, false, true);
-                        writer.Write($"{typeName}");
-                        if (extends.Count > 0)
-                            writer.Write($" : {string.Join(", ", extends)}");
-                        if (config.DumpTypeDefIndex)
-                            writer.Write($" // TypeDefIndex: {typeDefIndex}\n{{");
-                        else
-                            writer.Write("\n{");
+                            klass += "struct ";
+
+                        klass += typeName;
+
+                        //if ((typeDef.flags & TYPE_ATTRIBUTE_NESTED_PUBLIC) != 0)
+                            //klass += "NESTD";
+
+
+                        if (!typeDef.IsEnum)
+                        {
+                            if (extends.Count > 0)
+                                klass_inerhit = $" : ark::meta<{typeName}, {string.Join(", ", extends)}>";
+                            else klass_inerhit = $" : ark::meta<{typeName}>";
+                        }
+
                         //dump field
                         if (config.DumpField && typeDef.field_count > 0)
                         {
-                            writer.Write("\n\t// Fields\n");
+                            fields += "\n    // Fields\n\n";
                             var fieldEnd = typeDef.fieldStart + typeDef.field_count;
                             for (var i = typeDef.fieldStart; i < fieldEnd; ++i)
                             {
@@ -120,150 +206,130 @@ namespace Il2CppDumper
                                 var fieldType = il2Cpp.types[fieldDef.typeIndex];
                                 var isStatic = false;
                                 var isConst = false;
-                                if (config.DumpAttribute)
-                                {
-                                    writer.Write(GetCustomAttribute(imageDef, fieldDef.customAttributeIndex, fieldDef.token, "\t"));
-                                }
-                                writer.Write("\t");
+
+                                var field_typename = executor.GetTypeName(fieldType, true, false, true);
+                                var field_name = metadata.GetStringFromIndex(fieldDef.nameIndex);
+
+
+                                types.Add(fieldType);
+
+                                fields += "    ";
                                 var access = fieldType.attrs & FIELD_ATTRIBUTE_FIELD_ACCESS_MASK;
-                                switch (access)
+
+                                // enum
+                                if (typeDef.IsEnum)
                                 {
-                                    case FIELD_ATTRIBUTE_PRIVATE:
-                                        writer.Write("private ");
-                                        break;
-                                    case FIELD_ATTRIBUTE_PUBLIC:
-                                        writer.Write("public ");
-                                        break;
-                                    case FIELD_ATTRIBUTE_FAMILY:
-                                        writer.Write("protected ");
-                                        break;
-                                    case FIELD_ATTRIBUTE_ASSEMBLY:
-                                    case FIELD_ATTRIBUTE_FAM_AND_ASSEM:
-                                        writer.Write("internal ");
-                                        break;
-                                    case FIELD_ATTRIBUTE_FAM_OR_ASSEM:
-                                        writer.Write("protected internal ");
-                                        break;
+                                    if (i == typeDef.fieldStart) klass_inerhit = " : " + field_typename;
+                                    else
+                                    {
+                                        fields += field_name;
+
+                                        if (metadata.GetFieldDefaultValueFromIndex(i, out var fieldDefaultValue) && fieldDefaultValue.dataIndex != -1)
+                                        {
+                                            if (TryGetDefaultValue(fieldDefaultValue.typeIndex, fieldDefaultValue.dataIndex, out var value))
+                                            {
+                                                fields += $" = ";
+                                                if (value is string str)
+                                                {
+                                                    fields += $"\"{str.ToEscapedString()}\"";
+                                                }
+                                                else if (value is char c)
+                                                {
+                                                    var v = (int)c;
+                                                    fields += $"'\\x{v:x}'";
+                                                }
+                                                else if (value != null)
+                                                {
+                                                    fields += $"{value}";
+                                                }
+                                            }
+                                            else
+                                            {
+                                                fields += $" /*Metadata offset 0x{value:X}*/";
+                                            }
+                                        }
+                                        fields += ",";
+                                    }
                                 }
-                                if ((fieldType.attrs & FIELD_ATTRIBUTE_LITERAL) != 0)
-                                {
-                                    isConst = true;
-                                    writer.Write("const ");
-                                }
+                                // class
                                 else
                                 {
-                                    if ((fieldType.attrs & FIELD_ATTRIBUTE_STATIC) != 0)
+                                    if ((fieldType.attrs & FIELD_ATTRIBUTE_LITERAL) != 0)
                                     {
-                                        isStatic = true;
-                                        writer.Write("static ");
-                                    }
-                                    if ((fieldType.attrs & FIELD_ATTRIBUTE_INIT_ONLY) != 0)
-                                    {
-                                        writer.Write("readonly ");
-                                    }
-                                }
-                                writer.Write($"{executor.GetTypeName(fieldType, false, false)} {metadata.GetStringFromIndex(fieldDef.nameIndex)}");
-                                if (metadata.GetFieldDefaultValueFromIndex(i, out var fieldDefaultValue) && fieldDefaultValue.dataIndex != -1)
-                                {
-                                    if (TryGetDefaultValue(fieldDefaultValue.typeIndex, fieldDefaultValue.dataIndex, out var value))
-                                    {
-                                        writer.Write($" = ");
-                                        if (value is string str)
-                                        {
-                                            writer.Write($"\"{str.ToEscapedString()}\"");
-                                        }
-                                        else if (value is char c)
-                                        {
-                                            var v = (int)c;
-                                            writer.Write($"'\\x{v:x}'");
-                                        }
-                                        else if (value != null)
-                                        {
-                                            writer.Write($"{value}");
-                                        }
+                                        isConst = true;
+                                        fields += "inline static constexpr ";
                                     }
                                     else
                                     {
-                                        writer.Write($" /*Metadata offset 0x{value:X}*/");
+                                        if ((fieldType.attrs & FIELD_ATTRIBUTE_STATIC) != 0)
+                                        {
+                                            isStatic = true;
+                                            fields += "static ";
+                                            var return_type = executor.GetTypeName(fieldType, true, false, true);
+                                            statics_def += "\n" + return_type + " " + executor.GetTypeDefName(typeDef, true, true) + "::" + field_name + "() { return statics()->" + field_name + "();";
+                                        }
                                     }
+                                    
+                                    fields += $"{field_typename} {field_name}";
+                                    if (isStatic) fields += "()";
+
+                                    if (metadata.GetFieldDefaultValueFromIndex(i, out var fieldDefaultValue) && fieldDefaultValue.dataIndex != -1)
+                                    {
+                                        if (TryGetDefaultValue(fieldDefaultValue.typeIndex, fieldDefaultValue.dataIndex, out var value))
+                                        {
+                                            fields += $" = ";
+                                            if (value is string str)
+                                            {
+                                                fields += $"\"{str.ToEscapedString()}\"";
+                                            }
+                                            else if (value is char c)
+                                            {
+                                                var v = (int)c;
+                                                fields += $"'\\x{v:x}'";
+                                            }
+                                            else if (value != null)
+                                            {
+                                                fields += $"{value}";
+                                            }
+                                        }
+                                        else
+                                        {
+                                            fields += $" /*Metadata offset 0x{value:X}*/";
+                                        }
+                                    }
+                                    if (config.DumpFieldOffset && !isConst)
+                                        fields += $"; // 0x{il2Cpp.GetFieldOffsetFromIndex(typeDefIndex, i - typeDef.fieldStart, i, typeDef.IsValueType, isStatic):X}";
+                                    else
+                                        fields += ";\n";
                                 }
-                                if (config.DumpFieldOffset && !isConst)
-                                    writer.Write("; // 0x{0:X}\n", il2Cpp.GetFieldOffsetFromIndex(typeDefIndex, i - typeDef.fieldStart, i, typeDef.IsValueType, isStatic));
-                                else
-                                    writer.Write(";\n");
+                                fields += "\n";
                             }
                         }
-                        //dump property
-                        if (config.DumpProperty && typeDef.property_count > 0)
-                        {
-                            writer.Write("\n\t// Properties\n");
-                            var propertyEnd = typeDef.propertyStart + typeDef.property_count;
-                            for (var i = typeDef.propertyStart; i < propertyEnd; ++i)
-                            {
-                                var propertyDef = metadata.propertyDefs[i];
-                                if (config.DumpAttribute)
-                                {
-                                    writer.Write(GetCustomAttribute(imageDef, propertyDef.customAttributeIndex, propertyDef.token, "\t"));
-                                }
-                                writer.Write("\t");
-                                if (propertyDef.get >= 0)
-                                {
-                                    var methodDef = metadata.methodDefs[typeDef.methodStart + propertyDef.get];
-                                    writer.Write(GetModifiers(methodDef));
-                                    var propertyType = il2Cpp.types[methodDef.returnType];
-                                    writer.Write($"{executor.GetTypeName(propertyType, false, false)} {metadata.GetStringFromIndex(propertyDef.nameIndex)} {{ ");
-                                }
-                                else if (propertyDef.set >= 0)
-                                {
-                                    var methodDef = metadata.methodDefs[typeDef.methodStart + propertyDef.set];
-                                    writer.Write(GetModifiers(methodDef));
-                                    var parameterDef = metadata.parameterDefs[methodDef.parameterStart];
-                                    var propertyType = il2Cpp.types[parameterDef.typeIndex];
-                                    writer.Write($"{executor.GetTypeName(propertyType, false, false)} {metadata.GetStringFromIndex(propertyDef.nameIndex)} {{ ");
-                                }
-                                if (propertyDef.get >= 0)
-                                    writer.Write("get; ");
-                                if (propertyDef.set >= 0)
-                                    writer.Write("set; ");
-                                writer.Write("}");
-                                writer.Write("\n");
-                            }
-                        }
+                        
                         //dump method
                         if (config.DumpMethod && typeDef.method_count > 0)
                         {
-                            writer.Write("\n\t// Methods\n");
+                            methods += "\n    // Methods\n\n";
                             var methodEnd = typeDef.methodStart + typeDef.method_count;
                             for (var i = typeDef.methodStart; i < methodEnd; ++i)
                             {
-                                writer.Write("\n");
                                 var methodDef = metadata.methodDefs[i];
-                                if (config.DumpAttribute)
+                                ulong fixedMethodPointer = 0;
+
+                                var methodPointer = il2Cpp.GetMethodPointer(imageName, methodDef);
+                                if (methodPointer > 0)
                                 {
-                                    writer.Write(GetCustomAttribute(imageDef, methodDef.customAttributeIndex, methodDef.token, "\t"));
+                                    fixedMethodPointer = il2Cpp.GetRVA(methodPointer);
                                 }
-                                if (config.DumpMethodOffset)
-                                {
-                                    var methodPointer = il2Cpp.GetMethodPointer(imageName, methodDef);
-                                    if (methodPointer > 0)
-                                    {
-                                        var fixedMethodPointer = il2Cpp.GetRVA(methodPointer);
-                                        writer.Write("\t// RVA: 0x{0:X} Offset: 0x{1:X} VA: 0x{2:X}", fixedMethodPointer, il2Cpp.MapVATR(methodPointer), methodPointer);
-                                    }
-                                    else
-                                    {
-                                        writer.Write("\t// RVA: -1 Offset: -1");
-                                    }
-                                    if (methodDef.slot != ushort.MaxValue)
-                                    {
-                                        writer.Write(" Slot: {0}", methodDef.slot);
-                                    }
-                                    writer.Write("\n");
-                                }
-                                writer.Write("\t");
-                                writer.Write(GetModifiers(methodDef));
+
+                                methods += "    ";
                                 var methodReturnType = il2Cpp.types[methodDef.returnType];
+                                types.Add(methodReturnType);
+
                                 var methodName = metadata.GetStringFromIndex(methodDef.nameIndex);
+                                methodName = methodName.Replace(".ctor", "ctor");
+                                methodName = methodName.Replace(".cctor", "cctor");
+
                                 if (methodDef.genericContainerIndex >= 0)
                                 {
                                     var genericContainer = metadata.genericContainers[methodDef.genericContainerIndex];
@@ -271,17 +337,28 @@ namespace Il2CppDumper
                                 }
                                 if (methodReturnType.byref == 1)
                                 {
-                                    writer.Write("ref ");
+                                    methods += "ref ";
                                 }
-                                writer.Write($"{executor.GetTypeName(methodReturnType, false, false)} {methodName}(");
+
+                                methods += $"{executor.GetTypeName(methodReturnType, true, false)} {methodName}(";
+
+                                // rva
+                                methods_rva += $"\n    method_rva({typeName}::{methodName}, 0x{fixedMethodPointer:X})";
+
                                 var parameterStrs = new List<string>();
+                                var parameter_names = new List<string>();
+ 
                                 for (var j = 0; j < methodDef.parameterCount; ++j)
                                 {
                                     var parameterStr = "";
                                     var parameterDef = metadata.parameterDefs[methodDef.parameterStart + j];
                                     var parameterName = metadata.GetStringFromIndex(parameterDef.nameIndex);
                                     var parameterType = il2Cpp.types[parameterDef.typeIndex];
-                                    var parameterTypeName = executor.GetTypeName(parameterType, false, false);
+                                    types.Add(parameterType);
+                                    var parameterTypeName = executor.GetTypeName(parameterType, true, false, true);
+
+                                    parameter_names.Add(parameterName);
+
                                     if (parameterType.byref == 1)
                                     {
                                         if ((parameterType.attrs & PARAM_ATTRIBUTE_OUT) != 0 && (parameterType.attrs & PARAM_ATTRIBUTE_IN) == 0)
@@ -297,17 +374,7 @@ namespace Il2CppDumper
                                             parameterStr += "ref ";
                                         }
                                     }
-                                    else
-                                    {
-                                        if ((parameterType.attrs & PARAM_ATTRIBUTE_IN) != 0)
-                                        {
-                                            parameterStr += "[In] ";
-                                        }
-                                        if ((parameterType.attrs & PARAM_ATTRIBUTE_OUT) != 0)
-                                        {
-                                            parameterStr += "[Out] ";
-                                        }
-                                    }
+
                                     parameterStr += $"{parameterTypeName} {parameterName}";
                                     if (metadata.GetParameterDefaultValueFromIndex(methodDef.parameterStart + j, out var parameterDefault) && parameterDefault.dataIndex != -1)
                                     {
@@ -335,48 +402,59 @@ namespace Il2CppDumper
                                     }
                                     parameterStrs.Add(parameterStr);
                                 }
-                                writer.Write(string.Join(", ", parameterStrs));
-                                writer.Write(") { }\n");
 
-                                if (il2Cpp.methodDefinitionMethodSpecs.TryGetValue(i, out var methodSpecs))
-                                {
-                                    writer.Write("\t/* GenericInstMethod :\n");
-                                    var groups = methodSpecs.GroupBy(x => il2Cpp.methodSpecGenericMethodPointers[x]);
-                                    foreach (var group in groups)
-                                    {
-                                        writer.Write("\t|\n");
-                                        var genericMethodPointer = group.Key;
-                                        if (genericMethodPointer > 0)
-                                        {
-                                            var fixedPointer = il2Cpp.GetRVA(genericMethodPointer);
-                                            writer.Write($"\t|-RVA: 0x{fixedPointer:X} Offset: 0x{il2Cpp.MapVATR(genericMethodPointer):X} VA: 0x{genericMethodPointer:X}\n");
-                                        }
-                                        else
-                                        {
-                                            writer.Write("\t|-RVA: -1 Offset: -1\n");
-                                        }
-                                        foreach (var methodSpec in group)
-                                        {
-                                            (var methodSpecTypeName, var methodSpecMethodName) = executor.GetMethodSpecName(methodSpec);
-                                            writer.Write($"\t|-{methodSpecTypeName}.{methodSpecMethodName}\n");
-                                        }
-                                    }
-                                    writer.Write("\t*/\n");
-                                }
+                                var methodCall = $"return method_call({methodName}, {string.Join(", ", parameter_names)}); ";
+                                if (parameter_names.Count() == 0) 
+                                    methodCall = $"return method_call({methodName}); ";
+
+                                methods += string.Join(", ", parameterStrs);
+                                methods += ") { " + methodCall + "} ";
+                                methods += $" // 0x{fixedMethodPointer:X} // ";
+                                methods += GetModifiers(methodDef);
+                                methods += "\n";
                             }
                         }
-                        writer.Write("}\n");
+
+                        // headers
+                        foreach(Il2CppType type in types)
+                        {
+                            if ((int)type.type > 0x0d && (int)type.type != 0x1c)
+                            {
+                                includes.Add($"#include <{include_path(type)}.hpp>\n");
+                            }
+                        }
+                        foreach (string include in includes)
+                        {
+                            headers += include;
+                        }
+
+
+                        //
+                        writer.Write("//" + file_path + "\n");
+                        writer.Write(headers);
+                        writer.Write("\nnamespace " + metadata.GetStringFromIndex(typeDef.namespaceIndex) + " {\n");
+                        writer.Write(klass + klass_inerhit + "\n{\n");
+
+                        writer.Write(fields);
+                        writer.Write(methods);
+
+                        writer.Write("\n};\n");
+                        writer.Write("\n}\n\n");
+
+                        writer.Write(statics_def);
+
+                        writer.Write("\n\nnamespace ark::method_info \n{");
+                        writer.Write(methods_rva);
+                        writer.Write("\n} // ark::method_info");
+
+                        writer.Close();
                     }
                 }
                 catch (Exception e)
                 {
-                    Console.WriteLine("ERROR: Some errors in dumping");
-                    writer.Write("/*");
-                    writer.Write(e);
-                    writer.Write("*/\n}\n");
+                    Console.WriteLine("ERROR: Some errors in dumping " + e.Message);
                 }
             }
-            writer.Close();
         }
 
         public string GetCustomAttribute(Il2CppImageDefinition imageDef, int customAttributeIndex, uint token, string padding = "")
@@ -395,7 +473,7 @@ namespace Il2CppDumper
                     var typeIndex = metadata.attributeTypes[attributeTypeRange.start + i];
                     sb.AppendFormat("{0}[{1}] // RVA: 0x{2:X} Offset: 0x{3:X} VA: 0x{4:X}\n",
                         padding,
-                        executor.GetTypeName(il2Cpp.types[typeIndex], false, false),
+                        executor.GetTypeName(il2Cpp.types[typeIndex], true, false),
                         fixedMethodPointer,
                         il2Cpp.MapVATR(methodPointer),
                         methodPointer);
