@@ -240,19 +240,6 @@ namespace Il2CppDumper
             var decompiler = new Il2CppDecompiler(executor);
             decompiler.Decompile(config, outputDir);
             Console.WriteLine("Done!");
-            if (config.GenerateStruct)
-            {
-                Console.WriteLine("Generate struct...");
-                var scriptGenerator = new StructGenerator(executor);
-                scriptGenerator.WriteScript(outputDir);
-                Console.WriteLine("Done!");
-            }
-            if (config.GenerateDummyDll)
-            {
-                Console.WriteLine("Generate dummy dll...");
-                DummyAssemblyExporter.Export(executor, outputDir, config.DummyDllAddToken);
-                Console.WriteLine("Done!");
-            }
         }
     }
 }
